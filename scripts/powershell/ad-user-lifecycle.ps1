@@ -109,7 +109,7 @@ function Update-ADUserAccount {
         if ($Role) {
             $CurrentGroups = (Get-ADUser $Username -Properties MemberOf).MemberOf
             foreach ($Group in $CurrentGroups) {
-                Remove-ADGroupMember -Identity $Group -Members $Username -Confirm:$false
+                Remove-ADGroupMember -Identity $Group -Members $Username -Confirm:$false -ErrorAction Stop
             }
             foreach ($Group in $RoleGroups[$Role]) {
                 Add-ADGroupMember -Identity $Group -Members $Username
@@ -129,32 +129,41 @@ function Disable-ADUserAccount {
 
     try {
         # Disable account immediately
-        Disable-ADAccount -Identity $Username
+        Disable-ADAccount -Identity $Username -ErrorAction Stop
         Write-Log "Account disabled: $Username"
 
         # Move to Disabled OU
         $DisabledOU = "OU=Disabled,OU=multi-site lab,DC=corp,DC=example,DC=com"
-        Move-ADObject -Identity (Get-ADUser $Username).DistinguishedName -TargetPath $DisabledOU
+        Move-ADObject -Identity (Get-ADUser $Username -ErrorAction Stop).DistinguishedName -TargetPath $DisabledOU -ErrorAction Stop
         Write-Log "Account moved to Disabled OU"
 
         # Remove all group memberships except Domain Users
-        $Groups = (Get-ADUser $Username -Properties MemberOf).MemberOf
+        $Groups = (Get-ADUser $Username -Properties MemberOf -ErrorAction Stop).MemberOf
+        $GroupFailures = 0
         foreach ($Group in $Groups) {
             try {
                 Remove-ADGroupMember -Identity $Group -Members $Username -Confirm:$false
                 Write-Log "Removed from group: $Group"
-            } catch { }
+            } catch {
+                $GroupFailures++
+                Write-Log "Could not remove group membership: ${Group}. $_" "WARN"
+            }
         }
 
         # Expire password immediately
-        Set-ADAccountExpiration -Identity $Username -DateTime (Get-Date)
+        Set-ADAccountExpiration -Identity $Username -DateTime (Get-Date) -ErrorAction Stop
         Write-Log "Account expiration set to now"
 
         # Add offboarding note to description
-        Set-ADUser -Identity $Username -Description "DISABLED $(Get-Date -Format 'yyyy-MM-dd') | JIRA: $TicketID"
+        Set-ADUser -Identity $Username -Description "DISABLED $(Get-Date -Format 'yyyy-MM-dd') | JIRA: $TicketID" -ErrorAction Stop
 
-        Write-Log "OFFBOARDING COMPLETE: $Username | All access revoked | JIRA: $TicketID"
-        Write-Log "NEXT STEPS: Revoke VPN access, Crypt Access, recover device"
+        if ($GroupFailures -gt 0) {
+            Write-Log "AD OFFBOARDING PARTIAL: $Username | $GroupFailures group removal(s) failed | JIRA: $TicketID" "WARN"
+        } else {
+            Write-Log "AD OFFBOARDING STEPS COMPLETE: $Username | Account disabled; external access not verified | JIRA: $TicketID"
+        }
+        Write-Log "NEXT STEPS: Revoke VPN and Crypt Access, revoke external sessions, recover device, and verify remaining access"
+        if ($GroupFailures -gt 0) { exit 1 }
     }
     catch {
         Write-Log "ERROR during offboarding: $_" "ERROR"
